@@ -3,7 +3,7 @@ import cv2
 import time
 
 IP = "100.66.19.92" 
-PORT = 4010
+PORT = 4011
 
 sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 sock.connect((IP, PORT))
