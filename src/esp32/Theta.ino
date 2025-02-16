@@ -1,36 +1,20 @@
 #include "esp_camera.h"
 #include <WiFi.h>
-
-// ===================
-// Select camera model
-// ===================
-
-#define CAMERA_MODEL_AI_THINKER // Has PSRAM
-
+#define CAMERA_MODEL_AI_THINKER
 #include "camera_pins.h"
 
+const char *ssid = "blank";
+const char *password = "blank";
 
-
-
-
-
-
-
-
-// ===========================
-// Enter your WiFi credentials
-// ===========================
-const char *ssid = "EC";
-const char *password = "password";
-
-void startCameraServer();
-void setupLedFlash(int pin);
+// Pre-define client and server details
+WiFiClient client;
+const uint16_t port = 4010;
+//const IPAddress serverIP("172.20.10.3");
+const IPAddress serverIP("192.168.2.64");
 
 void setup() {
   Serial.begin(115200);
-  Serial.setDebugOutput(true);
-  Serial.println();
-
+  
   camera_config_t config;
   config.ledc_channel = LEDC_CHANNEL_0;
   config.ledc_timer = LEDC_TIMER_0;
@@ -51,154 +35,90 @@ void setup() {
   config.pin_pwdn = PWDN_GPIO_NUM;
   config.pin_reset = RESET_GPIO_NUM;
   config.xclk_freq_hz = 20000000;
-  config.frame_size = FRAMESIZE_UXGA;
-  config.pixel_format = PIXFORMAT_JPEG;  // for streaming
-  //config.pixel_format = PIXFORMAT_RGB565; // for face detection/recognition
-  config.grab_mode = CAMERA_GRAB_WHEN_EMPTY;
+  
+  // Optimize frame size and quality for speed
+  config.frame_size = FRAMESIZE_VGA;  // Reduced from UXGA
+  config.pixel_format = PIXFORMAT_JPEG;
+  config.grab_mode = CAMERA_GRAB_LATEST;
   config.fb_location = CAMERA_FB_IN_PSRAM;
-  config.jpeg_quality = 12;
-  config.fb_count = 1;
+  config.jpeg_quality = 12;  // Increased compression
+  config.fb_count = 2;  // Double buffering
 
-  // if PSRAM IC present, init with UXGA resolution and higher JPEG quality
-  //                      for larger pre-allocated frame buffer.
-  if (config.pixel_format == PIXFORMAT_JPEG) {
-    if (psramFound()) {
-      config.jpeg_quality = 10;
-      config.fb_count = 2;
-      config.grab_mode = CAMERA_GRAB_LATEST;
-    } else {
-      // Limit the frame size when PSRAM is not available
-      config.frame_size = FRAMESIZE_SVGA;
-      config.fb_location = CAMERA_FB_IN_DRAM;
-    }
-  } else {
-    // Best option for face detection/recognition
-    config.frame_size = FRAMESIZE_240X240;
-#if CONFIG_IDF_TARGET_ESP32S3
+  if (psramFound()) {
+    config.jpeg_quality = 10;
     config.fb_count = 2;
-#endif
+    config.grab_mode = CAMERA_GRAB_LATEST;
+  } else {
+    config.frame_size = FRAMESIZE_SVGA;
+    config.fb_location = CAMERA_FB_IN_DRAM;
+    config.fb_count = 1;
   }
 
-#if defined(CAMERA_MODEL_ESP_EYE)
-  pinMode(13, INPUT_PULLUP);
-  pinMode(14, INPUT_PULLUP);
-#endif
-
-  // camera init
+  // Initialize camera
   esp_err_t err = esp_camera_init(&config);
   if (err != ESP_OK) {
     Serial.printf("Camera init failed with error 0x%x", err);
     return;
   }
 
+  // Optimize sensor settings
   sensor_t *s = esp_camera_sensor_get();
-  // initial sensors are flipped vertically and colors are a bit saturated
-  if (s->id.PID == OV3660_PID) {
-    s->set_vflip(s, 1);        // flip it back
-    s->set_brightness(s, 1);   // up the brightness just a bit
-    s->set_saturation(s, -2);  // lower the saturation
-  }
-  // drop down frame size for higher initial frame rate
-  if (config.pixel_format == PIXFORMAT_JPEG) {
-    s->set_framesize(s, FRAMESIZE_QVGA);
-  }
+  s->set_framesize(s, FRAMESIZE_VGA);
+  s->set_quality(s, 10);  // Increase compression
+  s->set_brightness(s, 0);  // Reduce processing
+  s->set_saturation(s, 0);
+  s->set_contrast(s, 0);
 
-#if defined(CAMERA_MODEL_M5STACK_WIDE) || defined(CAMERA_MODEL_M5STACK_ESP32CAM)
-  s->set_vflip(s, 1);
-  s->set_hmirror(s, 1);
-#endif
-
-#if defined(CAMERA_MODEL_ESP32S3_EYE)
-  s->set_vflip(s, 1);
-#endif
-
-// Setup LED FLash if LED pin is defined in camera_pins.h
-#if defined(LED_GPIO_NUM)
-  setupLedFlash(LED_GPIO_NUM);
-#endif
-
+  // Connect to WiFi
   WiFi.begin(ssid, password);
-  WiFi.setSleep(false);
-
-  Serial.print("WiFi connecting");
+  WiFi.setSleep(false);  // Disable WiFi power saving
+  
   while (WiFi.status() != WL_CONNECTED) {
     delay(500);
-    Serial.print(".");
   }
-  Serial.println("");
-  Serial.println("WiFi connected");
 
-  //startCameraServer();
+  // Initial connection to server
+  client.connect(serverIP, port);
+}
 
-  WiFiClient client;
-  uint16_t port=4010;
-  IPAddress ip = IPAddress("172.20.10.3");
-
-  client.connect(ip, port);
-
-  // Capture a frame
-  camera_fb_t* fb = esp_camera_fb_get();
-  if (!fb) {
-    Serial.println("Camera capture failed");
-    delay(500);
+void loop() {
+  static uint32_t lastFrameTime = 0;
+  const uint32_t FRAME_INTERVAL = 33;
+  
+  if ((millis() - lastFrameTime) < FRAME_INTERVAL) {
     return;
   }
 
-  // Send the frame data
-  client.write(fb->buf, fb->len);
-  client.write((const uint8_t*)"END_OF_FRAME", 12);
-
-  esp_camera_fb_return(fb); // Release the buffer
-
-  client.stop(); // Close connection
-  Serial.println("Frame sent");
-
-
-
-
-
-
-  //Serial.print("Camera Ready! Use 'http://");
-  //Serial.print(WiFi.localIP());
-  //Serial.println("' to connect");
-}
-
-void loop() {
-  // Do nothing. Everything is done in another task by the web server
-  delay(10000);
-}
-
-
-/*
-
-void loop() {
-  WiFiClient client;
-
-  // Attempt to connect to the server
-  if (client.connect(serverIP, serverPort)) {
-    Serial.println("Connected to server");
-
-    // Capture a frame
-    camera_fb_t* fb = esp_camera_fb_get();
-    if (!fb) {
-      Serial.println("Camera capture failed");
-      delay(500);
-      return;
-    }
-
-    // Send the frame data
-    client.write(fb->buf, fb->len);
-    client.write((const uint8_t*)"END_OF_FRAME", 12);
-
-    esp_camera_fb_return(fb); // Release the buffer
-
-    client.stop(); // Close connection
-    Serial.println("Frame sent");
-
-  } else {
-    Serial.println("Failed to connect to server");
+  if (!client.connected()) {
+    client.connect(serverIP, port);
   }
 
-  delay(500); // Send 2 frames per second (1000ms/500ms)
+  camera_fb_t* fb = esp_camera_fb_get();
+  if (fb) {
+    if (client.connected()) {
+      // Send frame in chunks
+      //const size_t chunkSize = 4096;
+      const size_t chunkSize = 512;
+      size_t remaining = fb->len;
+      uint8_t* ptr = fb->buf;
+      
+      while (remaining > 0) {
+        size_t toWrite = (remaining < chunkSize) ? remaining : chunkSize;
+        size_t written = client.write(ptr, toWrite);
+        if (written > 0) {
+          ptr += written;
+          remaining -= written;
+        } 
+        else {
+          break;
+        }
+      }
+      
+      // Send END_OF_FRAME marker for server to use
+      client.write((const uint8_t*)"END_OF_FRAME", 12);
+    }
+    esp_camera_fb_return(fb);
+  }
+  
+  lastFrameTime = millis();
 }
-*/
